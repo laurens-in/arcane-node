@@ -141,29 +141,20 @@ mod app {
     #[task(priority = 1, shared = [led], local = [pdm])]
     async fn pdm_read(ctx: pdm_read::Context) {
         loop {
-            // this reads the value of the pointer, not the actua
-            // let started = ctx.local.pdm.events_started.read().bits();
-            // if started != 0 {
-            //     defmt::trace!("started {:?}", started)
-            // }
-
-            // let data = ctx.local.pdm.events_end.read().bits();
-            // if data != 0 {
-            //     defmt::trace!("data {:?}", data);
-            // }
-
-            let txd: [u8; 2] = [0, 0];
-            let txd_ptr = txd.as_ptr() as u32;
-
-            // Set up the DMA read.
-            ctx.local
-                .pdm
-                .sample
-                .ptr
-                .write(|w| unsafe { w.sampleptr().bits(txd_ptr) });
-            if 1 != 0 {
-                defmt::trace!("test {:?}", txd);
+            let started = ctx.local.pdm.events_started.read().bits();
+            if started != 0 {
+                defmt::trace!("started {:?}", started)
             }
+
+            let ended = ctx.local.pdm.events_end.read().bits();
+            if ended != 0 {
+                defmt::trace!("ended {:?}", ended);
+            }
+
+            // Read data, no idea how
+
+            // reset
+            ctx.local.pdm.events_end.write(|w| w);
         }
     }
 }
