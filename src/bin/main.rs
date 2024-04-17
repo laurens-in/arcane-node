@@ -13,14 +13,17 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
     dispatchers = [SWI0_EGU0]
 )]
 mod app {
+    use embedded_hal::can::{ExtendedId, Frame, Id};
+    use mcp2515::{error::Error, frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
     use nrf52840_hal::{
-        gpio::{p0, p1, Input, Level, Output, Pin, PullUp, PushPull},
+        gpio::{p0, p1, Floating, Input, Level, Output, Pin, PushPull},
         gpiote::Gpiote,
-        pac::{pdm, PDM},
+        pac::{PDM, SPIM0},
         prelude::*,
+        spim, Delay, Spim,
     };
 
-    use rtic_monotonics::nrf::rtc::Rtc0 as Mono;
+    use rtic_monotonics::{nrf::rtc::Rtc0 as Mono, systick::fugit::Duration};
 
     // Shared resources go here
     #[shared]
@@ -33,6 +36,8 @@ mod app {
     struct Local {
         gpiote: Gpiote,
         pdm: PDM,
+        can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
+        data: [u8; 128],
     }
 
     #[init]
@@ -47,16 +52,51 @@ mod app {
         let token = rtic_monotonics::create_nrf_rtc0_monotonic_token!();
         Mono::start(ctx.device.RTC0, token);
 
+        // initialize gpio ports
         let port0 = p0::Parts::new(ctx.device.P0);
-
         let port1 = p1::Parts::new(ctx.device.P1);
 
         // initialize LED (OFF)
         let led = port1.p1_01.into_push_pull_output(Level::Low).degrade();
 
-        // intialize PDM CLK
+        // intialize PDM
         let _clk: Pin<Output<PushPull>> = port1.p1_09.into_push_pull_output(Level::Low).degrade();
-        let _dat: Pin<Input<PullUp>> = port0.p0_08.into_pullup_input().degrade();
+        let _dat: Pin<Input<Floating>> = port0.p0_08.into_floating_input().degrade();
+
+        // initialize SPI
+        let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
+        let spimosi = port0.p0_13.into_push_pull_output(Level::Low).degrade();
+        let spimiso = port0.p0_15.into_floating_input().degrade();
+
+        let cs = port1.p1_08.into_push_pull_output(Level::Low);
+
+        let pins = spim::Pins {
+            sck: Some(spiclk),
+            miso: Some(spimiso),
+            mosi: Some(spimosi),
+        };
+        let spi = Spim::new(
+            ctx.device.SPIM0,
+            pins,
+            spim::Frequency::K500,
+            spim::MODE_0,
+            0,
+        );
+
+        let mut delay = Delay::new(ctx.core.SYST);
+
+        let mut can = MCP2515::new(spi, cs);
+
+        can.init(
+            &mut delay,
+            mcp2515::Settings {
+                mode: OpMode::Loopback,        // Loopback for testing and example
+                can_speed: CanSpeed::Kbps1000, // Many options supported.
+                mcp_speed: McpSpeed::MHz16,    // Currently 16MHz and 8MHz chips are supported.
+                clkout_en: false,
+            },
+        )
+        .unwrap();
 
         // setup GPIOTE peripheral to trigger an interrupt on P1_02 (CLUE button A)
         // high-to-low transition. another option would be to enable SENSE in pin
@@ -68,6 +108,8 @@ mod app {
             .input_pin(&button)
             .hi_to_lo()
             .enable_interrupt();
+
+        let mut data: [u8; 128] = [0; 128];
 
         // let pdm = p.PDM; // ASK: why not??
         let pdm = ctx.device.PDM;
@@ -89,24 +131,35 @@ mod app {
         // set mode to mono
         pdm.mode.write(|w| w.operation().bit(true));
 
-        // pdm.inten
-        //     .write(|w| w.started().bit(true).stopped().bit(true).end().bit(true));
-
         // enable PDM peripheral
         pdm.enable.write(|w| w.enable().bit(true));
 
-        pdm.sample.ptr.write(|w| unsafe { w.bits(0x20000000) });
+        pdm.gainl.write(|w| unsafe { w.gainl().bits(0x0) });
+        pdm.gainr.write(|w| unsafe { w.gainr().bits(0x0) });
+
+        pdm.sample
+            .ptr
+            .write(|w| unsafe { w.bits(data.as_mut_ptr() as u32) });
         pdm.sample
             .maxcnt
-            .write(|w| unsafe { w.buffsize().bits(0x2) });
+            .write(|w| unsafe { w.buffsize().bits(128) });
 
         pdm.tasks_start.write(|w| unsafe { w.bits(0x1) });
 
         defmt::info!("init done");
+        defmt::info!("{:?}", data.as_ptr());
 
-        pdm_read::spawn().ok();
+        can_test::spawn().ok();
 
-        (Shared { led }, Local { gpiote, pdm })
+        (
+            Shared { led },
+            Local {
+                gpiote,
+                pdm,
+                can,
+                data,
+            },
+        )
     }
 
     #[idle]
@@ -114,7 +167,7 @@ mod app {
         loop {
             // Cortex-M wait for interrupt instruction (WFI) - do nothing and
             // go to sleep
-            rtic::export::wfi();
+            // rtic::export::wfi();
         }
     }
 
@@ -138,14 +191,18 @@ mod app {
     //     defmt::info!("{:?}", sample);
     // }
 
-    #[task(priority = 1, shared = [led], local = [pdm])]
+    #[task(priority = 1, shared = [led], local = [pdm, data])]
     async fn pdm_read(ctx: pdm_read::Context) {
         loop {
             let started = ctx.local.pdm.events_started.read().bits();
             if started != 0 {
-                defmt::trace!("started {:?}", started)
+                defmt::trace!("started {:?}", started);
+                ctx.local
+                    .pdm
+                    .sample
+                    .ptr
+                    .write(|w| unsafe { w.bits(ctx.local.data.as_mut_ptr() as u32) });
             }
-
             let ended = ctx.local.pdm.events_end.read().bits();
             if ended != 0 {
                 defmt::trace!("ended {:?}", ended);
@@ -153,8 +210,40 @@ mod app {
 
             // Read data, no idea how
 
+            defmt::trace!(
+                "data {:?}",
+                u16::from_le_bytes([ctx.local.data[0], ctx.local.data[1]])
+            );
+
             // reset
             ctx.local.pdm.events_end.write(|w| w);
+        }
+    }
+
+    #[task(priority = 1, shared = [], local = [can])]
+    async fn can_test(ctx: can_test::Context) {
+        loop {
+            // Send a message
+            let frame = CanFrame::new(
+                Id::Extended(ExtendedId::MAX),
+                &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            )
+            .unwrap();
+
+            ctx.local.can.send_message(frame).unwrap();
+
+            defmt::info!("Sent message");
+
+            // Read the message back (we are in loopback mode)
+            match ctx.local.can.read_message() {
+                Ok(frame) => {
+                    defmt::info!("Received frame {:?}", frame);
+                }
+                Err(Error::NoMessage) => defmt::info!("No message to read!"),
+                Err(_) => panic!("Oh no!"),
+            }
+
+            Mono::delay(Duration::<u64, 1, 32768>::from_ticks(1000)).await;
         }
     }
 }
