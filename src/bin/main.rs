@@ -37,7 +37,7 @@ mod app {
         gpiote: Gpiote,
         pdm: PDM,
         can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
-        data: [u8; 128],
+        data: &'static [u8; 128],
     }
 
     #[init]
@@ -109,47 +109,50 @@ mod app {
             .hi_to_lo()
             .enable_interrupt();
 
-        let mut data: [u8; 128] = [0; 128];
+        static data: [u8; 128] = [0; 128];
 
         // let pdm = p.PDM; // ASK: why not??
         let pdm = ctx.device.PDM;
 
+        // enable PDM peripheral
+        pdm.enable.write(|w| w.enable().bit(true));
+
         // configure PDM clock
         pdm.psel.clk.write(|w| unsafe {
-            w.port().bit(true);
-            w.pin().bits(0x09);
-            w.connect().bit(true)
+            w.port().bit(true).pin().bits(0x09).connect().bit(true)
         });
 
         // configure PDM data pin
         pdm.psel.din.write(|w| unsafe {
-            w.port().bit(false);
-            w.pin().bits(0x08);
-            w.connect().bit(true)
+            w.port().bit(false).pin().bits(0x08).connect().bit(true)
         });
 
+        pdm.pdmclkctrl.write(|w| w.freq().default());
+
         // set mode to mono
-        pdm.mode.write(|w| w.operation().bit(true));
+        pdm.mode.write(|w| w.operation().bit(true).edge().left_rising());
 
-        // enable PDM peripheral
-        pdm.enable.write(|w| w.enable().bit(true));
-
-        pdm.gainl.write(|w| unsafe { w.gainl().bits(0x0) });
-        pdm.gainr.write(|w| unsafe { w.gainr().bits(0x0) });
+        // set gain 
+        pdm.gainl.write(|w| unsafe { w.gainl().bits(0x28) });
+        pdm.gainr.write(|w| unsafe { w.gainr().bits(0x28) });
 
         pdm.sample
             .ptr
-            .write(|w| unsafe { w.bits(data.as_mut_ptr() as u32) });
+            .write(|w| unsafe { w.sampleptr().bits(data.as_ptr() as u32)});
+
         pdm.sample
             .maxcnt
-            .write(|w| unsafe { w.buffsize().bits(128) });
+            .write(|w| unsafe { w.buffsize().bits(128/2) });
 
-        pdm.tasks_start.write(|w| unsafe { w.bits(0x1) });
+        pdm.tasks_start.write(|w| unsafe { w.tasks_start().bit(true) });
+
 
         defmt::info!("init done");
         defmt::info!("{:?}", data.as_ptr());
 
-        can_test::spawn().ok();
+
+        // can_test::spawn().ok();
+        pdm_read::spawn().ok();
 
         (
             Shared { led },
@@ -157,7 +160,7 @@ mod app {
                 gpiote,
                 pdm,
                 can,
-                data,
+                data: &data,
             },
         )
     }
@@ -201,22 +204,21 @@ mod app {
                     .pdm
                     .sample
                     .ptr
-                    .write(|w| unsafe { w.bits(ctx.local.data.as_mut_ptr() as u32) });
+                    .write(|w| unsafe { w.sampleptr().bits(ctx.local.data.as_ptr() as u32) });
             }
             let ended = ctx.local.pdm.events_end.read().bits();
             if ended != 0 {
                 defmt::trace!("ended {:?}", ended);
+
+                defmt::trace!(
+                    "data {:?}",
+                    // u16::from_le_bytes([ctx.local.data[0], ctx.local.data[1]])
+                    ctx.local.data
+                );
+    
+                // reset
+                // ctx.local.pdm.events_end.write(|w| w);
             }
-
-            // Read data, no idea how
-
-            defmt::trace!(
-                "data {:?}",
-                u16::from_le_bytes([ctx.local.data[0], ctx.local.data[1]])
-            );
-
-            // reset
-            ctx.local.pdm.events_end.write(|w| w);
         }
     }
 
@@ -243,7 +245,7 @@ mod app {
                 Err(_) => panic!("Oh no!"),
             }
 
-            Mono::delay(Duration::<u64, 1, 32768>::from_ticks(1000)).await;
+            // Mono::delay(Duration::<u64, 1, 32768>::from_ticks(1000)).await;
         }
     }
 }
