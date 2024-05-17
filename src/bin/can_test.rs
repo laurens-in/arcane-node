@@ -4,27 +4,21 @@
 
 use arcane_node as _; // global logger + panicking-behavior + memory layout
 
-// TODO(7) Configure the `rtic::app` macro
 #[rtic::app(
-    // TODO: Replace `some_hal::pac` with the path to the PAC
     device = nrf52840_hal::pac,
-    // TODO: Replace the `FreeInterrupt1, ...` with free interrupt vectors if software tasks are used
-    // You can usually find the names of the interrupt vectors in the some_hal::pac::interrupt enum.
     dispatchers = [SWI0_EGU0]
 )]
 mod app {
-    use arcane_node::mic::Microphone;
     use embedded_hal::can::{Frame, Id, StandardId};
-    use mcp2515::{error::Error, frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
+    use mcp2515::{frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
     use nrf52840_hal::{
-        gpio::{p0, p1, Floating, Input, Level, Output, Pin, PushPull},
+        gpio::{p0, p1, Level, Output, Pin, PushPull},
         gpiote::Gpiote,
-        pac::{PDM, SPIM0},
+        pac::SPIM0,
         prelude::*,
         spim, Delay, Spim,
     };
-
-    use rtic_monotonics::{nrf::rtc::Rtc0 as Mono, systick::fugit::Duration};
+    use rtic_monotonics::nrf::rtc::{ExtU64, Rtc0 as Mono};
 
     // Shared resources go here
     #[shared]
@@ -41,8 +35,6 @@ mod app {
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
-        // let p = Peripherals::take().unwrap(); // ASK: why doesn't this work?
-
         // set SLEEPONEXIT and SLEEPDEEP bits to enter low power sleep states
         ctx.core.SCB.set_sleeponexit();
         ctx.core.SCB.set_sleepdeep();
@@ -62,7 +54,6 @@ mod app {
         let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
         let spimosi = port0.p0_13.into_push_pull_output(Level::Low).degrade();
         let spimiso = port0.p0_15.into_floating_input().degrade();
-
         let cs = port1.p1_08.into_push_pull_output(Level::Low);
 
         let pins = spim::Pins {
@@ -70,6 +61,7 @@ mod app {
             miso: Some(spimiso),
             mosi: Some(spimosi),
         };
+
         let spi = Spim::new(
             ctx.device.SPIM0,
             pins,
@@ -79,15 +71,13 @@ mod app {
         );
 
         // initialize CAN
-
         let mut delay = Delay::new(ctx.core.SYST);
-
         let mut can = MCP2515::new(spi, cs);
 
         can.init(
             &mut delay,
             mcp2515::Settings {
-                mode: OpMode::Loopback,        // Loopback for testing and example
+                mode: OpMode::Normal,          // Loopback for testing and example
                 can_speed: CanSpeed::Kbps1000, // Many options supported.
                 mcp_speed: McpSpeed::MHz16,    // Currently 16MHz and 8MHz chips are supported.
                 clkout_en: false,
@@ -100,11 +90,15 @@ mod app {
         // configuration and then use GPIOTE PORT event for detection...
         let button = port1.p1_02.into_pullup_input().degrade();
         let gpiote = Gpiote::new(ctx.device.GPIOTE);
+
         gpiote
             .channel0()
             .input_pin(&button)
             .hi_to_lo()
             .enable_interrupt();
+
+        // schedule task
+        can_send_test::spawn().unwrap();
 
         (Shared { led }, Local { gpiote, can })
     }
@@ -146,27 +140,12 @@ mod app {
                 )
                 .unwrap(), // MIDI Note-Off
             };
-            // Send a message
-            let frame = CanFrame::new(
-                Id::Standard(StandardId::new(0b0000 + 0b000000).unwrap()),
-                &[0x90, 0x3C, 0x40], // MIDI Note-On
-            )
-            .unwrap();
 
             ctx.local.can.send_message(frame).unwrap();
 
-            defmt::info!("Sent Note-On");
+            defmt::info!("Sent Midi Message");
 
-            // Read the message back (we are in loopback mode)
-            // match ctx.local.can.read_message() {
-            //     Ok(frame) => {
-            //         defmt::info!("Received frame {:?}", frame);
-            //     }
-            //     Err(Error::NoMessage) => defmt::info!("No message to read!"),
-            //     Err(_) => panic!("Oh no!"),
-            // }
-
-            // Mono::delay(Duration::<u64, 1, 32768>::from_ticks(1000)).await;
+            Mono::delay(1000.millis()).await;
         }
     }
 }

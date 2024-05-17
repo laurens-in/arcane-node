@@ -1,16 +1,13 @@
-use embedded_hal::digital::OutputPin;
-use nrf52840_hal::{
-    gpio::{p1, Level},
-    pac, Clocks,
-};
+use nrf52840_hal::pac;
 
 const PDM_DATA_PORT: bool = false;
 const PDM_DATA_PIN: u8 = 0x00;
 const PDM_CLOCK_PORT: bool = false;
 const PDM_CLOCK_PIN: u8 = 0x01;
 
-const GAIN: i8 = 0x00;
-const SAMPLECOUNT: u16 = 128;
+// TODO: move to bin
+// const GAIN: i8 = 0x00;
+// const SAMPLECOUNT: u16 = 128;
 
 pub struct Microphone {
     pdm: pac::PDM,
