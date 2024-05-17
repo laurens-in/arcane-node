@@ -36,9 +36,7 @@ mod app {
     #[local]
     struct Local {
         gpiote: Gpiote,
-        pdm: PDM,
         can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
-        data: &'static [u8; 128],
     }
 
     #[init]
@@ -60,10 +58,6 @@ mod app {
         // initialize LED (OFF)
         let led = port1.p1_01.into_push_pull_output(Level::Low).degrade();
 
-        // intialize PDM
-        let _clk: Pin<Output<PushPull>> = port1.p1_09.into_push_pull_output(Level::Low).degrade();
-        let _dat: Pin<Input<Floating>> = port0.p0_08.into_floating_input().degrade();
-
         // initialize SPI
         let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
         let spimosi = port0.p0_13.into_push_pull_output(Level::Low).degrade();
@@ -84,6 +78,8 @@ mod app {
             0,
         );
 
+        // initialize CAN
+
         let mut delay = Delay::new(ctx.core.SYST);
 
         let mut can = MCP2515::new(spi, cs);
@@ -99,7 +95,7 @@ mod app {
         )
         .unwrap();
 
-        // setup GPIOTE peripheral to trigger an interrupt on P1_02 (CLUE button A)
+        // setup GPIOTE peripheral to trigger an interrupt on P1_02
         // high-to-low transition. another option would be to enable SENSE in pin
         // configuration and then use GPIOTE PORT event for detection...
         let button = port1.p1_02.into_pullup_input().degrade();
@@ -110,22 +106,7 @@ mod app {
             .hi_to_lo()
             .enable_interrupt();
 
-        static data: [u8; 128] = [0; 128];
-
-        // let pdm = p.PDM; // ASK: why not??
-        let pdm = ctx.device.PDM;
-
-        let mic = Microphone::new(pdm);
-
-        (
-            Shared { led },
-            Local {
-                gpiote,
-                pdm,
-                can,
-                data: &data,
-            },
-        )
+        (Shared { led }, Local { gpiote, can })
     }
 
     #[idle]
@@ -150,44 +131,21 @@ mod app {
         }
     }
 
-    // #[task(binds = PDM, shared = [led], local = [pdm])]
-    // fn pdm_event(ctx: pdm_event::Context) {
-    //     let reg = ctx.local.pdm.sample.ptr.read();
-    //     let sample = reg.bits();
-    //     defmt::info!("{:?}", sample);
-    // }
-
-    #[task(priority = 1, shared = [led], local = [pdm, data])]
-    async fn pdm_read(ctx: pdm_read::Context) {
+    #[task(priority = 1, shared = [], local = [can, state: bool = false])]
+    async fn can_send_test(ctx: can_send_test::Context) {
         loop {
-            let started = ctx.local.pdm.events_started.read().bits();
-            if started != 0 {
-                defmt::trace!("started {:?}", started);
-                ctx.local
-                    .pdm
-                    .sample
-                    .ptr
-                    .write(|w| unsafe { w.sampleptr().bits(ctx.local.data.as_ptr() as u32) });
-            }
-            let ended = ctx.local.pdm.events_end.read().bits();
-            if ended != 0 {
-                defmt::trace!("ended {:?}", ended);
-
-                defmt::trace!(
-                    "data {:?}",
-                    // u16::from_le_bytes([ctx.local.data[0], ctx.local.data[1]])
-                    ctx.local.data
-                );
-
-                // reset
-                // ctx.local.pdm.events_end.write(|w| w);
-            }
-        }
-    }
-
-    #[task(priority = 1, shared = [], local = [can])]
-    async fn can_test(ctx: can_test::Context) {
-        loop {
+            let frame = match *ctx.local.state {
+                true => CanFrame::new(
+                    Id::Standard(StandardId::new(0b0001 + 0b000001).unwrap()),
+                    &[0x90, 0x3C, 0x40],
+                )
+                .unwrap(), // MIDI Note-On
+                false => CanFrame::new(
+                    Id::Standard(StandardId::new(0b0001 + 0b000001).unwrap()),
+                    &[0x90, 0x3C, 0x00],
+                )
+                .unwrap(), // MIDI Note-Off
+            };
             // Send a message
             let frame = CanFrame::new(
                 Id::Standard(StandardId::new(0b0000 + 0b000000).unwrap()),
@@ -197,7 +155,7 @@ mod app {
 
             ctx.local.can.send_message(frame).unwrap();
 
-            defmt::info!("Sent message");
+            defmt::info!("Sent Note-On");
 
             // Read the message back (we are in loopback mode)
             // match ctx.local.can.read_message() {
