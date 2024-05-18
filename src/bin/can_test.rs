@@ -18,7 +18,7 @@ mod app {
         prelude::*,
         spim, Delay, Spim,
     };
-    use rtic_monotonics::nrf::rtc::{ExtU64, Rtc0 as Mono};
+    use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
 
     // Shared resources go here
     #[shared]
@@ -40,15 +40,15 @@ mod app {
         ctx.core.SCB.set_sleepdeep();
 
         // Initialize Monotonic
-        let token = rtic_monotonics::create_nrf_rtc0_monotonic_token!();
-        Mono::start(ctx.device.RTC0, token);
+        let token = rtic_monotonics::create_nrf_timer0_monotonic_token!();
+        Mono::start(ctx.device.TIMER0, token);
 
         // initialize gpio ports
         let port0 = p0::Parts::new(ctx.device.P0);
         let port1 = p1::Parts::new(ctx.device.P1);
 
         // initialize LED (OFF)
-        let led = port1.p1_01.into_push_pull_output(Level::Low).degrade();
+        let led = port1.p1_10.into_push_pull_output(Level::Low).degrade();
 
         // initialize SPI
         let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
@@ -77,9 +77,9 @@ mod app {
         can.init(
             &mut delay,
             mcp2515::Settings {
-                mode: OpMode::Normal,          // Loopback for testing and example
-                can_speed: CanSpeed::Kbps1000, // Many options supported.
-                mcp_speed: McpSpeed::MHz16,    // Currently 16MHz and 8MHz chips are supported.
+                mode: OpMode::Normal,         // Loopback for testing and example
+                can_speed: CanSpeed::Kbps500, // Many options supported.
+                mcp_speed: McpSpeed::MHz8,    // Currently 16MHz and 8MHz chips are supported.
                 clkout_en: false,
             },
         )
@@ -98,7 +98,7 @@ mod app {
             .enable_interrupt();
 
         // schedule task
-        can_send_test::spawn().unwrap();
+        can_send_test::spawn().ok();
 
         (Shared { led }, Local { gpiote, can })
     }
@@ -117,9 +117,10 @@ mod app {
         if ctx.local.gpiote.channel0().is_event_triggered() {
             ctx.local.gpiote.channel0().reset_events();
 
+            defmt::info!("Button pressed!");
             match *ctx.local.state {
                 true => ctx.shared.led.lock(|l| l.set_low().unwrap()),
-                false => ctx.shared.led.lock(|l| l.set_low().unwrap()),
+                false => ctx.shared.led.lock(|l| l.set_high().unwrap()),
             }
             *ctx.local.state = !*ctx.local.state;
         }
@@ -130,22 +131,29 @@ mod app {
         loop {
             let frame = match *ctx.local.state {
                 true => CanFrame::new(
-                    Id::Standard(StandardId::new(0b0001 + 0b000001).unwrap()),
+                    Id::Standard(StandardId::new(0b00010000001).unwrap()),
                     &[0x90, 0x3C, 0x40],
                 )
                 .unwrap(), // MIDI Note-On
                 false => CanFrame::new(
-                    Id::Standard(StandardId::new(0b0001 + 0b000001).unwrap()),
+                    Id::Standard(StandardId::new(0b00010000001).unwrap()),
                     &[0x90, 0x3C, 0x00],
                 )
                 .unwrap(), // MIDI Note-Off
             };
 
-            ctx.local.can.send_message(frame).unwrap();
+            ctx.local
+                .can
+                .send_message(frame)
+                .unwrap_or_else(|_| defmt::error!("Something went wrong"));
 
             defmt::info!("Sent Midi Message");
 
+            *ctx.local.state = !*ctx.local.state;
+
             Mono::delay(1000.millis()).await;
+
+            defmt::info!("Waited for a second");
         }
     }
 }
