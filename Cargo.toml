@@ -16,6 +16,8 @@ nrf52840-hal = "0.16.0"
 rtic-monotonics = { version = "1.0.0", features = [ "cortex-m-systick", "nrf52840" ] }
 mcp2515 = { version = "0.2.2", features = [ "defmt" ] }
 embedded-hal = "0.2.3"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde-json-core = "0.5.1"
 
 # cargo build/run
 [profile.dev]

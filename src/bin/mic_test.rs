@@ -9,17 +9,17 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
     dispatchers = [SWI0_EGU0]
 )]
 mod app {
+
+    use arcane_node::config::Config;
     use arcane_node::mic::Microphone;
-    use embedded_hal::can::{Frame, Id, StandardId};
-    use mcp2515::{frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
     use nrf52840_hal::{
         gpio::{p0, p1, Level, Output, Pin, PushPull},
         gpiote::Gpiote,
-        pac::SPIM0,
         prelude::*,
-        spim, Clocks, Delay, Spim,
+        Clocks,
     };
     use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
+    use serde_json_core;
 
     const PDM_DATA_PORT: bool = false;
     const PDM_DATA_PIN: u8 = 0x08;
@@ -28,6 +28,8 @@ mod app {
 
     const GAIN: i8 = 0x00;
     const SAMPLECOUNT: u16 = 128;
+
+    const CONFIG_JSON: &str = include_str!("../../config.json");
 
     fn mean(samples: &[i16]) -> f32 {
         let mut avg: f32 = 0.0;
@@ -55,6 +57,9 @@ mod app {
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
+        // Parse the JSON configuration data
+        let config: Config = serde_json_core::from_str(CONFIG_JSON).unwrap().0;
+        defmt::info!("{:?}", config);
         // set SLEEPONEXIT and SLEEPDEEP bits to enter low power sleep states
         ctx.core.SCB.set_sleeponexit();
         ctx.core.SCB.set_sleepdeep();

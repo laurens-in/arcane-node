@@ -1,0 +1,13 @@
+{
+  "id": 0,
+  "parameters": {
+    "gain": {
+      "index": 0,
+      "value": 0
+    },
+    "threshold": {
+      "index": 1,
+      "value": 2000
+    }
+  }
+}
