@@ -4,27 +4,43 @@
 
 use arcane_node as _; // global logger + panicking-behavior + memory layout
 
-// TODO(7) Configure the `rtic::app` macro
 #[rtic::app(
-    // TODO: Replace `some_hal::pac` with the path to the PAC
     device = nrf52840_hal::pac,
-    // TODO: Replace the `FreeInterrupt1, ...` with free interrupt vectors if software tasks are used
-    // You can usually find the names of the interrupt vectors in the some_hal::pac::interrupt enum.
     dispatchers = [SWI0_EGU0]
 )]
 mod app {
+
+    use arcane_node::config::Config;
     use arcane_node::mic::Microphone;
     use embedded_hal::can::{Frame, Id, StandardId};
-    use mcp2515::{error::Error, frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
+    use mcp2515::{frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
     use nrf52840_hal::{
-        gpio::{p0, p1, Floating, Input, Level, Output, Pin, PushPull},
+        gpio::{p0, p1, Level, Output, Pin, PushPull},
         gpiote::Gpiote,
-        pac::{PDM, SPIM0},
+        pac::SPIM0,
         prelude::*,
-        spim, Delay, Spim,
+        spim, Clocks, Delay, Spim,
     };
+    use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
+    use serde_json_core;
 
-    use rtic_monotonics::{nrf::rtc::Rtc0 as Mono, systick::fugit::Duration};
+    const PDM_DATA_PORT: bool = false;
+    const PDM_DATA_PIN: u8 = 0x08;
+    const PDM_CLOCK_PORT: bool = true;
+    const PDM_CLOCK_PIN: u8 = 0x09;
+
+    const GAIN: i8 = 0x00;
+    const SAMPLECOUNT: u16 = 128;
+
+    const CONFIG_JSON: &str = include_str!("../../config.json");
+
+    fn mean(samples: &[i16]) -> f32 {
+        let mut avg: f32 = 0.0;
+        for s in samples {
+            avg += (*s).saturating_abs() as f32;
+        }
+        avg / (samples.len() as f32)
+    }
 
     // Shared resources go here
     #[shared]
@@ -36,39 +52,37 @@ mod app {
     #[local]
     struct Local {
         gpiote: Gpiote,
-        pdm: PDM,
         can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
-        data: &'static [u8; 128],
+        mic: Microphone,
+        pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2],
+        buf_to_display: usize,
+        buf_to_capture: usize,
     }
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
-        // let p = Peripherals::take().unwrap(); // ASK: why doesn't this work?
-
+        // Parse the JSON configuration data
+        let config: Config = serde_json_core::from_str(CONFIG_JSON).unwrap().0;
+        defmt::info!("{:?}", config);
         // set SLEEPONEXIT and SLEEPDEEP bits to enter low power sleep states
         ctx.core.SCB.set_sleeponexit();
         ctx.core.SCB.set_sleepdeep();
 
         // Initialize Monotonic
-        let token = rtic_monotonics::create_nrf_rtc0_monotonic_token!();
-        Mono::start(ctx.device.RTC0, token);
+        let token = rtic_monotonics::create_nrf_timer0_monotonic_token!();
+        Mono::start(ctx.device.TIMER0, token);
 
         // initialize gpio ports
         let port0 = p0::Parts::new(ctx.device.P0);
         let port1 = p1::Parts::new(ctx.device.P1);
 
         // initialize LED (OFF)
-        let led = port1.p1_01.into_push_pull_output(Level::Low).degrade();
-
-        // intialize PDM
-        let _clk: Pin<Output<PushPull>> = port1.p1_09.into_push_pull_output(Level::Low).degrade();
-        let _dat: Pin<Input<Floating>> = port0.p0_08.into_floating_input().degrade();
+        let led = port1.p1_10.into_push_pull_output(Level::Low).degrade();
 
         // initialize SPI
         let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
         let spimosi = port0.p0_13.into_push_pull_output(Level::Low).degrade();
         let spimiso = port0.p0_15.into_floating_input().degrade();
-
         let cs = port1.p1_08.into_push_pull_output(Level::Low);
 
         let pins = spim::Pins {
@@ -76,6 +90,7 @@ mod app {
             miso: Some(spimiso),
             mosi: Some(spimosi),
         };
+
         let spi = Spim::new(
             ctx.device.SPIM0,
             pins,
@@ -84,46 +99,65 @@ mod app {
             0,
         );
 
+        // initialize CAN
         let mut delay = Delay::new(ctx.core.SYST);
-
         let mut can = MCP2515::new(spi, cs);
 
         can.init(
             &mut delay,
             mcp2515::Settings {
-                mode: OpMode::Loopback,        // Loopback for testing and example
-                can_speed: CanSpeed::Kbps1000, // Many options supported.
-                mcp_speed: McpSpeed::MHz16,    // Currently 16MHz and 8MHz chips are supported.
+                mode: OpMode::Normal,         // Loopback for testing and example
+                can_speed: CanSpeed::Kbps500, // Many options supported.
+                mcp_speed: McpSpeed::MHz8,    // Currently 16MHz and 8MHz chips are supported.
                 clkout_en: false,
             },
         )
         .unwrap();
 
-        // setup GPIOTE peripheral to trigger an interrupt on P1_02 (CLUE button A)
+        // initiliaze MIC
+
+        let mut mic = Microphone::new(ctx.device.PDM);
+
+        // we need the high frequency oscillator enabled for the microphone
+        let c = Clocks::new(ctx.device.CLOCK);
+        c.enable_ext_hfosc();
+
+        let pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2] = [[0; SAMPLECOUNT as usize]; 2];
+
+        let mut buf_to_display: usize = 0;
+        let mut buf_to_capture: usize = 1;
+
+        mic.enable();
+        mic.enable_interrupts();
+        mic.set_gain(GAIN);
+
+        mic.set_sample_buffer(&pdm_buffers[buf_to_capture]);
+        mic.start_sampling();
+
+        // setup GPIOTE peripheral to trigger an interrupt on P1_02
         // high-to-low transition. another option would be to enable SENSE in pin
         // configuration and then use GPIOTE PORT event for detection...
         let button = port1.p1_02.into_pullup_input().degrade();
         let gpiote = Gpiote::new(ctx.device.GPIOTE);
+
         gpiote
             .channel0()
             .input_pin(&button)
             .hi_to_lo()
             .enable_interrupt();
 
-        static data: [u8; 128] = [0; 128];
-
-        // let pdm = p.PDM; // ASK: why not??
-        let pdm = ctx.device.PDM;
-
-        let mic = Microphone::new(pdm);
+        // schedule task
+        // mic_task::spawn().ok();
 
         (
             Shared { led },
             Local {
                 gpiote,
-                pdm,
                 can,
-                data: &data,
+                mic,
+                pdm_buffers,
+                buf_to_display,
+                buf_to_capture,
             },
         )
     }
@@ -142,73 +176,59 @@ mod app {
         if ctx.local.gpiote.channel0().is_event_triggered() {
             ctx.local.gpiote.channel0().reset_events();
 
+            defmt::info!("Button pressed!");
             match *ctx.local.state {
                 true => ctx.shared.led.lock(|l| l.set_low().unwrap()),
-                false => ctx.shared.led.lock(|l| l.set_low().unwrap()),
+                false => ctx.shared.led.lock(|l| l.set_high().unwrap()),
             }
             *ctx.local.state = !*ctx.local.state;
         }
     }
 
-    // #[task(binds = PDM, shared = [led], local = [pdm])]
-    // fn pdm_event(ctx: pdm_event::Context) {
-    //     let reg = ctx.local.pdm.sample.ptr.read();
-    //     let sample = reg.bits();
-    //     defmt::info!("{:?}", sample);
-    // }
-
-    #[task(priority = 1, shared = [led], local = [pdm, data])]
-    async fn pdm_read(ctx: pdm_read::Context) {
-        loop {
-            let started = ctx.local.pdm.events_started.read().bits();
-            if started != 0 {
-                defmt::trace!("started {:?}", started);
-                ctx.local
-                    .pdm
-                    .sample
-                    .ptr
-                    .write(|w| unsafe { w.sampleptr().bits(ctx.local.data.as_ptr() as u32) });
-            }
-            let ended = ctx.local.pdm.events_end.read().bits();
-            if ended != 0 {
-                defmt::trace!("ended {:?}", ended);
-
-                defmt::trace!(
-                    "data {:?}",
-                    // u16::from_le_bytes([ctx.local.data[0], ctx.local.data[1]])
-                    ctx.local.data
-                );
-
-                // reset
-                // ctx.local.pdm.events_end.write(|w| w);
-            }
+    #[task(binds = PDM, shared = [led], local = [mic, pdm_buffers, buf_to_display, buf_to_capture])]
+    fn mic_task(mut ctx: mic_task::Context) {
+        let mean = mean(&ctx.local.pdm_buffers[*ctx.local.buf_to_display]);
+        // defmt::println!("mean: {}", mean);
+        if mean > 2000.00 {
+            ctx.shared.led.lock(|l| l.set_high().unwrap());
+            send_can_message::spawn();
+        } else {
+            ctx.shared.led.lock(|l| l.set_low().unwrap());
         }
+
+        (*ctx.local.buf_to_capture, *ctx.local.buf_to_display) = if *ctx.local.buf_to_capture == 0 {
+            (1, 0)
+        } else {
+            (0, 1)
+        };
+
+        // Wait for the current buffer capture to complete, then start on the flipped buffer
+        while !ctx.local.mic.sampling_started() {}
+
+        ctx.local.mic.clear_sampling_started();
+        ctx.local
+            .mic
+            .set_sample_buffer(&ctx.local.pdm_buffers[*ctx.local.buf_to_capture]);
     }
 
-    #[task(priority = 1, shared = [], local = [can])]
-    async fn can_test(ctx: can_test::Context) {
-        loop {
-            // Send a message
-            let frame = CanFrame::new(
-                Id::Standard(StandardId::new(0b0000 + 0b000000).unwrap()),
-                &[0x90, 0x3C, 0x40], // MIDI Note-On
+    #[task(priority = 1, local = [can])]
+    async fn send_can_message(ctx: send_can_message::Context) {
+        defmt::trace!("send note-on");
+        ctx.local.can.send_message(
+            CanFrame::new(
+                Id::Standard(StandardId::new(0b00010000001).unwrap()),
+                &[0x90, 0x3C, 0x40],
             )
-            .unwrap();
-
-            ctx.local.can.send_message(frame).unwrap();
-
-            defmt::info!("Sent message");
-
-            // Read the message back (we are in loopback mode)
-            // match ctx.local.can.read_message() {
-            //     Ok(frame) => {
-            //         defmt::info!("Received frame {:?}", frame);
-            //     }
-            //     Err(Error::NoMessage) => defmt::info!("No message to read!"),
-            //     Err(_) => panic!("Oh no!"),
-            // }
-
-            // Mono::delay(Duration::<u64, 1, 32768>::from_ticks(1000)).await;
-        }
+            .unwrap(),
+        );
+        Mono::delay(20.millis()).await;
+        defmt::trace!("send note-off");
+        ctx.local.can.send_message(
+            CanFrame::new(
+                Id::Standard(StandardId::new(0b00010000001).unwrap()),
+                &[0x90, 0x3C, 0x00],
+            )
+            .unwrap(),
+        );
     }
 }
