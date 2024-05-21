@@ -32,7 +32,7 @@ mod app {
     fn mean(samples: &[i16]) -> f32 {
         let mut avg: f32 = 0.0;
         for s in samples {
-            avg += *s as f32;
+            avg += (*s).saturating_abs() as f32;
         }
         avg / (samples.len() as f32)
     }
