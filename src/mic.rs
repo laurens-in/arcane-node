@@ -1,9 +1,9 @@
 use nrf52840_hal::pac;
 
 const PDM_DATA_PORT: bool = false;
-const PDM_DATA_PIN: u8 = 0x00;
-const PDM_CLOCK_PORT: bool = false;
-const PDM_CLOCK_PIN: u8 = 0x01;
+const PDM_DATA_PIN: u8 = 0x08;
+const PDM_CLOCK_PORT: bool = true;
+const PDM_CLOCK_PIN: u8 = 0x09;
 
 // TODO: move to bin
 // const GAIN: i8 = 0x00;
@@ -42,7 +42,7 @@ impl Microphone {
     }
     pub fn enable_interrupt() {}
     pub fn disable_interrupt() {}
-    pub fn set_sample_buffer(&self, buf: &[u16]) {
+    pub fn set_sample_buffer(&self, buf: &[i16]) {
         unsafe {
             self.pdm.sample.ptr.write(|w| w.bits(buf.as_ptr() as u32));
             self.pdm.sample.maxcnt.write(|w| w.bits(buf.len() as u32));
