@@ -191,7 +191,8 @@ mod app {
         // defmt::println!("mean: {}", mean);
         if mean > 2000.00 {
             ctx.shared.led.lock(|l| l.set_high().unwrap());
-            send_can_message::spawn();
+            send_can_message::spawn()
+                .unwrap_or_else(|_| defmt::error!("Cannot spawn task, already running..."));
         } else {
             ctx.shared.led.lock(|l| l.set_low().unwrap());
         }
@@ -214,21 +215,27 @@ mod app {
     #[task(priority = 1, local = [can])]
     async fn send_can_message(ctx: send_can_message::Context) {
         defmt::trace!("send note-on");
-        ctx.local.can.send_message(
-            CanFrame::new(
-                Id::Standard(StandardId::new(0b00010000001).unwrap()),
-                &[0x90, 0x3C, 0x40],
+        ctx.local
+            .can
+            .send_message(
+                CanFrame::new(
+                    Id::Standard(StandardId::new(0b00010000001).unwrap()),
+                    &[0x90, 0x3C, 0x40],
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        );
+            .unwrap_or_else(|_| defmt::error!("Something went wrong"));
         Mono::delay(20.millis()).await;
         defmt::trace!("send note-off");
-        ctx.local.can.send_message(
-            CanFrame::new(
-                Id::Standard(StandardId::new(0b00010000001).unwrap()),
-                &[0x90, 0x3C, 0x00],
+        ctx.local
+            .can
+            .send_message(
+                CanFrame::new(
+                    Id::Standard(StandardId::new(0b00010000001).unwrap()),
+                    &[0x90, 0x3C, 0x00],
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        );
+            .unwrap_or_else(|_| defmt::error!("Something went wrong"));
     }
 }
