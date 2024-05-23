@@ -21,11 +21,6 @@ mod app {
     use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
     use serde_json_core;
 
-    const PDM_DATA_PORT: bool = false;
-    const PDM_DATA_PIN: u8 = 0x08;
-    const PDM_CLOCK_PORT: bool = true;
-    const PDM_CLOCK_PIN: u8 = 0x09;
-
     const GAIN: i8 = 0x00;
     const SAMPLECOUNT: u16 = 128;
 
@@ -85,8 +80,8 @@ mod app {
 
         let pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2] = [[0; SAMPLECOUNT as usize]; 2];
 
-        let mut buf_to_display: usize = 0;
-        let mut buf_to_capture: usize = 1;
+        let buf_to_display: usize = 0;
+        let buf_to_capture: usize = 1;
 
         mic.enable();
         mic.enable_interrupts();

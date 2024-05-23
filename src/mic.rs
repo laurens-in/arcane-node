@@ -5,10 +5,6 @@ const PDM_DATA_PIN: u8 = 0x08;
 const PDM_CLOCK_PORT: bool = true;
 const PDM_CLOCK_PIN: u8 = 0x09;
 
-// TODO: move to bin
-// const GAIN: i8 = 0x00;
-// const SAMPLECOUNT: u16 = 128;
-
 pub struct Microphone {
     pdm: pac::PDM,
 }

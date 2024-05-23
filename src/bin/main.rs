@@ -13,9 +13,9 @@ mod app {
     use arcane_node::config::Config;
     use arcane_node::mic::Microphone;
     use embedded_hal::can::{Frame, Id, StandardId};
-    use mcp2515::{frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
+    use mcp2515::{error::Error, frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
     use nrf52840_hal::{
-        gpio::{p0, p1, Level, Output, Pin, PushPull},
+        gpio::{p0, p1, Input, Level, Output, Pin, PullDown, PullUp, PushPull},
         gpiote::Gpiote,
         pac::SPIM0,
         prelude::*,
@@ -23,11 +23,6 @@ mod app {
     };
     use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
     use serde_json_core;
-
-    const PDM_DATA_PORT: bool = false;
-    const PDM_DATA_PIN: u8 = 0x08;
-    const PDM_CLOCK_PORT: bool = true;
-    const PDM_CLOCK_PIN: u8 = 0x09;
 
     const GAIN: i8 = 0x00;
     const SAMPLECOUNT: u16 = 128;
@@ -45,18 +40,22 @@ mod app {
     // Shared resources go here
     #[shared]
     struct Shared {
-        led: Pin<Output<PushPull>>,
+        // led: Pin<Output<PushPull>>,
+        can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
     }
 
     // Local resources go here
     #[local]
     struct Local {
         gpiote: Gpiote,
-        can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
+        // can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
+        led_blue: Pin<Output<PushPull>>,
+        led_red: Pin<Output<PushPull>>,
         mic: Microphone,
         pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2],
         buf_to_display: usize,
         buf_to_capture: usize,
+        spi_int: Pin<Input<PullUp>>,
     }
 
     #[init]
@@ -65,8 +64,8 @@ mod app {
         let config: Config = serde_json_core::from_str(CONFIG_JSON).unwrap().0;
         defmt::info!("{:?}", config);
         // set SLEEPONEXIT and SLEEPDEEP bits to enter low power sleep states
-        ctx.core.SCB.set_sleeponexit();
-        ctx.core.SCB.set_sleepdeep();
+        // ctx.core.SCB.set_sleeponexit();
+        // ctx.core.SCB.set_sleepdeep();
 
         // Initialize Monotonic
         let token = rtic_monotonics::create_nrf_timer0_monotonic_token!();
@@ -77,7 +76,8 @@ mod app {
         let port1 = p1::Parts::new(ctx.device.P1);
 
         // initialize LED (OFF)
-        let led = port1.p1_10.into_push_pull_output(Level::Low).degrade();
+        let led_blue = port1.p1_10.into_push_pull_output(Level::Low).degrade();
+        let led_red = port1.p1_15.into_push_pull_output(Level::Low).degrade();
 
         // initialize SPI
         let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
@@ -124,8 +124,8 @@ mod app {
 
         let pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2] = [[0; SAMPLECOUNT as usize]; 2];
 
-        let mut buf_to_display: usize = 0;
-        let mut buf_to_capture: usize = 1;
+        let buf_to_display: usize = 0;
+        let buf_to_capture: usize = 1;
 
         mic.enable();
         mic.enable_interrupts();
@@ -137,27 +137,34 @@ mod app {
         // setup GPIOTE peripheral to trigger an interrupt on P1_02
         // high-to-low transition. another option would be to enable SENSE in pin
         // configuration and then use GPIOTE PORT event for detection...
-        let button = port1.p1_02.into_pullup_input().degrade();
+        let _button = port1.p1_02.into_pullup_input().degrade();
+        let spi_int = port0.p0_07.into_pullup_input().degrade();
+
+        // read_can_message::spawn();
+
         let gpiote = Gpiote::new(ctx.device.GPIOTE);
 
         gpiote
             .channel0()
-            .input_pin(&button)
+            .input_pin(&spi_int)
             .hi_to_lo()
             .enable_interrupt();
 
-        // schedule task
-        // mic_task::spawn().ok();
-
         (
-            Shared { led },
+            Shared {
+                // led,
+                can,
+            },
             Local {
                 gpiote,
-                can,
+                // can,
+                led_blue,
+                led_red,
                 mic,
                 pdm_buffers,
                 buf_to_display,
                 buf_to_capture,
+                spi_int,
             },
         )
     }
@@ -171,30 +178,45 @@ mod app {
         }
     }
 
-    #[task(binds = GPIOTE, shared = [led] , local = [gpiote, state: bool = false])]
+    #[task(binds = GPIOTE, shared = [can] , local = [gpiote, led_red, spi_int, state: bool = false])]
     fn gpiote_event(mut ctx: gpiote_event::Context) {
         if ctx.local.gpiote.channel0().is_event_triggered() {
             ctx.local.gpiote.channel0().reset_events();
+            ctx.local.gpiote.channel0().clear();
 
-            defmt::info!("Button pressed!");
+            match ctx.local.spi_int.is_high() {
+                Ok(state) => defmt::trace!("Received frame {:?}", state),
+                Err(state) => defmt::trace!("Pin is low?"),
+                Err(_) => defmt::trace!("Cannot read pin state"),
+            }
+            defmt::info!("interrupt from spi!");
+            ctx.shared.can.lock(|c| match c.read_message() {
+                Ok(frame) => {
+                    defmt::trace!("Received frame {:?}", frame);
+                }
+                Err(Error::NoMessage) => defmt::trace!("No message to read!"),
+                Err(_) => defmt::trace!("Oh no!"),
+            });
             match *ctx.local.state {
-                true => ctx.shared.led.lock(|l| l.set_low().unwrap()),
-                false => ctx.shared.led.lock(|l| l.set_high().unwrap()),
+                true => ctx.local.led_red.set_low().unwrap(),
+                false => ctx.local.led_red.set_high().unwrap(),
             }
             *ctx.local.state = !*ctx.local.state;
         }
     }
 
-    #[task(binds = PDM, shared = [led], local = [mic, pdm_buffers, buf_to_display, buf_to_capture])]
-    fn mic_task(mut ctx: mic_task::Context) {
+    #[task(binds = PDM, local = [mic, led_blue, pdm_buffers, buf_to_display, buf_to_capture])]
+    fn mic_task(ctx: mic_task::Context) {
         let mean = mean(&ctx.local.pdm_buffers[*ctx.local.buf_to_display]);
         // defmt::println!("mean: {}", mean);
-        if mean > 2000.00 {
-            ctx.shared.led.lock(|l| l.set_high().unwrap());
+        if mean > 6000.00 {
+            // ctx.shared.led.lock(|l| l.set_high().unwrap());
+            ctx.local.led_blue.set_high().unwrap();
             send_can_message::spawn()
                 .unwrap_or_else(|_| defmt::error!("Cannot spawn task, already running..."));
         } else {
-            ctx.shared.led.lock(|l| l.set_low().unwrap());
+            // ctx.shared.led.lock(|l| l.set_low().unwrap());
+            ctx.local.led_blue.set_low().unwrap();
         }
 
         (*ctx.local.buf_to_capture, *ctx.local.buf_to_display) = if *ctx.local.buf_to_capture == 0 {
@@ -212,30 +234,46 @@ mod app {
             .set_sample_buffer(&ctx.local.pdm_buffers[*ctx.local.buf_to_capture]);
     }
 
-    #[task(priority = 1, local = [can])]
-    async fn send_can_message(ctx: send_can_message::Context) {
+    #[task(priority = 1, shared = [can])]
+    async fn send_can_message(mut ctx: send_can_message::Context) {
         defmt::trace!("send note-on");
-        ctx.local
-            .can
-            .send_message(
+        ctx.shared.can.lock(|c| {
+            c.send_message(
                 CanFrame::new(
                     Id::Standard(StandardId::new(0b00010000001).unwrap()),
                     &[0x90, 0x3C, 0x40],
                 )
                 .unwrap(),
             )
-            .unwrap_or_else(|_| defmt::error!("Something went wrong"));
+            .unwrap_or_else(|_| defmt::error!("Something went wrong"))
+        });
         Mono::delay(20.millis()).await;
         defmt::trace!("send note-off");
-        ctx.local
-            .can
-            .send_message(
+        ctx.shared.can.lock(|c| {
+            c.send_message(
                 CanFrame::new(
                     Id::Standard(StandardId::new(0b00010000001).unwrap()),
                     &[0x90, 0x3C, 0x00],
                 )
                 .unwrap(),
             )
-            .unwrap_or_else(|_| defmt::error!("Something went wrong"));
+            .unwrap_or_else(|_| defmt::error!("Something went wrong"))
+        });
+        Mono::delay(30.millis()).await;
     }
+
+    // This works without problem
+    // #[task(priority = 1, shared = [can])]
+    // async fn read_can_message(mut ctx: read_can_message::Context) {
+    //     loop {
+    //         ctx.shared.can.lock(|c| match c.read_message() {
+    //             Ok(frame) => {
+    //                 defmt::trace!("Received frame {:?}", frame);
+    //             }
+    //             Err(Error::NoMessage) => defmt::trace!("No message to read!"),
+    //             Err(_) => panic!("Oh no!"),
+    //         });
+    //         Mono::delay(10.millis()).await;
+    //     }
+    // }
 }
