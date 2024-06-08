@@ -12,10 +12,10 @@ mod app {
 
     use arcane_node::config::Config;
     use arcane_node::mic::Microphone;
-    use embedded_hal::can::{Frame, Id, StandardId};
+    use embedded_hal::can::{Frame, Id, Id::Standard, StandardId};
     use mcp2515::{error::Error, frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
     use nrf52840_hal::{
-        gpio::{p0, p1, Input, Level, Output, Pin, PullDown, PullUp, PushPull},
+        gpio::{p0, p1, Input, Level, Output, Pin, PullUp, PushPull},
         gpiote::Gpiote,
         pac::SPIM0,
         prelude::*,
@@ -24,7 +24,7 @@ mod app {
     use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
     use serde_json_core;
 
-    const GAIN: i8 = 0x00;
+    const GAIN: i8 = -35;
     const SAMPLECOUNT: u16 = 128;
 
     const CONFIG_JSON: &str = include_str!("../../config.json");
@@ -42,6 +42,7 @@ mod app {
     struct Shared {
         // led: Pin<Output<PushPull>>,
         can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
+        config: Config,
     }
 
     // Local resources go here
@@ -59,7 +60,7 @@ mod app {
     }
 
     #[init]
-    fn init(mut ctx: init::Context) -> (Shared, Local) {
+    fn init(ctx: init::Context) -> (Shared, Local) {
         // Parse the JSON configuration data
         let config: Config = serde_json_core::from_str(CONFIG_JSON).unwrap().0;
         defmt::info!("{:?}", config);
@@ -106,9 +107,9 @@ mod app {
         can.init(
             &mut delay,
             mcp2515::Settings {
-                mode: OpMode::Normal,         // Loopback for testing and example
-                can_speed: CanSpeed::Kbps500, // Many options supported.
-                mcp_speed: McpSpeed::MHz8,    // Currently 16MHz and 8MHz chips are supported.
+                mode: OpMode::Normal,          // Loopback for testing and example
+                can_speed: CanSpeed::Kbps1000, // Many options supported.
+                mcp_speed: McpSpeed::MHz16,    // Currently 16MHz and 8MHz chips are supported.
                 clkout_en: false,
             },
         )
@@ -154,10 +155,10 @@ mod app {
             Shared {
                 // led,
                 can,
+                config,
             },
             Local {
                 gpiote,
-                // can,
                 led_blue,
                 led_red,
                 mic,
@@ -178,22 +179,30 @@ mod app {
         }
     }
 
-    #[task(binds = GPIOTE, shared = [can] , local = [gpiote, led_red, spi_int, state: bool = false])]
+    #[task(binds = GPIOTE, shared = [can, config] , local = [gpiote, led_red, spi_int, state: bool = false])]
     fn gpiote_event(mut ctx: gpiote_event::Context) {
         if ctx.local.gpiote.channel0().is_event_triggered() {
             ctx.local.gpiote.channel0().reset_events();
             ctx.local.gpiote.channel0().clear();
 
+            // TODO: remove?
             match ctx.local.spi_int.is_high() {
-                Ok(state) => defmt::trace!("Received frame {:?}", state),
-                Err(state) => defmt::trace!("Pin is low?"),
-                Err(_) => defmt::trace!("Cannot read pin state"),
+                Ok(_) => defmt::trace!("Received frame"),
+                Err(_) => defmt::trace!("Pin is low?"),
+                // Err(_) => defmt::trace!("Cannot read pin state"),
             }
             defmt::info!("interrupt from spi!");
+
+            let config = ctx.shared.config.lock(|c| c.clone());
+
             ctx.shared.can.lock(|c| match c.read_message() {
-                Ok(frame) => {
-                    defmt::trace!("Received frame {:?}", frame);
-                }
+                Ok(frame) => match frame.id() {
+                    Standard(id) if id == StandardId::new(config.id as u16).unwrap() => {
+                        defmt::trace!("Message for this node: {:?}", frame)
+                        // match against index of param
+                    }
+                    _ => defmt::trace!("Message for other node"),
+                },
                 Err(Error::NoMessage) => defmt::trace!("No message to read!"),
                 Err(_) => defmt::trace!("Oh no!"),
             });
@@ -205,17 +214,16 @@ mod app {
         }
     }
 
-    #[task(binds = PDM, local = [mic, led_blue, pdm_buffers, buf_to_display, buf_to_capture])]
-    fn mic_task(ctx: mic_task::Context) {
+    #[task(binds = PDM, shared = [config], local = [mic, led_blue, pdm_buffers, buf_to_display, buf_to_capture])]
+    fn mic_task(mut ctx: mic_task::Context) {
+        let threshold = ctx.shared.config.lock(|c| c.parameters.threshold.value);
         let mean = mean(&ctx.local.pdm_buffers[*ctx.local.buf_to_display]);
-        // defmt::println!("mean: {}", mean);
-        if mean > 6000.00 {
-            // ctx.shared.led.lock(|l| l.set_high().unwrap());
+        if mean > threshold {
             ctx.local.led_blue.set_high().unwrap();
+            defmt::println!("mean: {}", mean);
             send_can_message::spawn()
                 .unwrap_or_else(|_| defmt::error!("Cannot spawn task, already running..."));
         } else {
-            // ctx.shared.led.lock(|l| l.set_low().unwrap());
             ctx.local.led_blue.set_low().unwrap();
         }
 
@@ -234,46 +242,32 @@ mod app {
             .set_sample_buffer(&ctx.local.pdm_buffers[*ctx.local.buf_to_capture]);
     }
 
-    #[task(priority = 1, shared = [can])]
+    #[task(priority = 1, shared = [can, config])]
     async fn send_can_message(mut ctx: send_can_message::Context) {
         defmt::trace!("send note-on");
+        let config = ctx.shared.config.lock(|c| c.clone());
         ctx.shared.can.lock(|c| {
             c.send_message(
                 CanFrame::new(
-                    Id::Standard(StandardId::new(0b00010000001).unwrap()),
-                    &[0x90, 0x3C, 0x40],
+                    Id::Standard(StandardId::new((0b0001 as u16) << 7 | config.id as u16).unwrap()),
+                    &[0x90, config.parameters.note.value, 0x40],
                 )
                 .unwrap(),
             )
             .unwrap_or_else(|_| defmt::error!("Something went wrong"))
         });
-        Mono::delay(20.millis()).await;
+        Mono::delay(config.parameters.length.value.millis()).await;
         defmt::trace!("send note-off");
         ctx.shared.can.lock(|c| {
             c.send_message(
                 CanFrame::new(
-                    Id::Standard(StandardId::new(0b00010000001).unwrap()),
-                    &[0x90, 0x3C, 0x00],
+                    Id::Standard(StandardId::new((0b0001 as u16) << 7 | config.id as u16).unwrap()),
+                    &[0x90, config.parameters.note.value, 0x00],
                 )
                 .unwrap(),
             )
             .unwrap_or_else(|_| defmt::error!("Something went wrong"))
         });
-        Mono::delay(30.millis()).await;
+        Mono::delay(config.parameters.throttle.value.millis()).await;
     }
-
-    // This works without problem
-    // #[task(priority = 1, shared = [can])]
-    // async fn read_can_message(mut ctx: read_can_message::Context) {
-    //     loop {
-    //         ctx.shared.can.lock(|c| match c.read_message() {
-    //             Ok(frame) => {
-    //                 defmt::trace!("Received frame {:?}", frame);
-    //             }
-    //             Err(Error::NoMessage) => defmt::trace!("No message to read!"),
-    //             Err(_) => panic!("Oh no!"),
-    //         });
-    //         Mono::delay(10.millis()).await;
-    //     }
-    // }
 }

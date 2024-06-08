@@ -1,5 +1,5 @@
 {
-  "id": 0,
+  "id": 3,
   "parameters": {
     "gain": {
       "index": 0,
@@ -9,21 +9,33 @@
     },
     "threshold": {
       "index": 1,
-      "value": 2000,
+      "value": 10000,
       "name": "Threshold",
       "description": "Threshold when trigger should detect, i16 > 0"
     },
     "length": {
       "index": 2,
-      "value": 2000,
+      "value": 20,
+      "name": "Length",
+      "description": "How long should the note play, i16"
+    },
+    "throttle": {
+      "index": 3,
+      "value": 10,
       "name": "Length",
       "description": "How long should the note play, i16"
     },
     "note": {
-      "index": 3,
-      "value": 60,
+      "index": 4,
+      "value": 70,
       "name": "Note Number",
-      "description": "MIDI note number, that should be played"
+      "description": "MIDI note number"
+    },
+    "channel": {
+      "index": 5,
+      "value": 0,
+      "name": "MIDI Channel",
+      "description": "MIDI Channel"
     }
   }
 }
