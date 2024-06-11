@@ -9,13 +9,11 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
     dispatchers = [SWI0_EGU0]
 )]
 mod app {
-
-    use arcane_node::config::Parameters;
     use arcane_node::mic::Microphone;
     use arcane_node::{config::Config, initialize_can};
     use arcane_node::{initialize_mic, process_cfg, SAMPLECOUNT};
-    use embedded_hal::can::{Frame, Id, Id::Standard, StandardId};
-    use mcp2515::{error::Error, frame::CanFrame, MCP2515};
+    use embedded_hal::can::{Frame, Id, StandardId};
+    use mcp2515::{frame::CanFrame, MCP2515};
     use nrf52840_hal::{
         gpio::{p0, p1, Input, Level, Output, Pin, PullUp, PushPull},
         gpiote::Gpiote,
@@ -25,9 +23,6 @@ mod app {
     };
     use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
     use serde_json_core;
-
-    const GAIN: i8 = -35;
-    // const SAMPLECOUNT: u16 = 128;
 
     const CONFIG_JSON: &str = include_str!("../../config.json");
 
