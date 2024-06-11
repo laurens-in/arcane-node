@@ -9,36 +9,33 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
     dispatchers = [SWI0_EGU0]
 )]
 mod app {
-    use embedded_hal::can::{Frame, Id, StandardId};
-    use mcp2515::{frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
+    use arcane_node::initialize_can;
+    use embedded_hal::{
+        can::{Frame, Id, StandardId},
+        digital::v2::OutputPin,
+    };
+    use mcp2515::{frame::CanFrame, MCP2515};
     use nrf52840_hal::{
         gpio::{p0, p1, Level, Output, Pin, PushPull},
         gpiote::Gpiote,
         pac::SPIM0,
-        prelude::*,
-        spim, Delay, Spim,
+        spim, Spim,
     };
     use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
 
     // Shared resources go here
     #[shared]
-    struct Shared {
-        led: Pin<Output<PushPull>>,
-    }
+    struct Shared {}
 
     // Local resources go here
     #[local]
     struct Local {
-        gpiote: Gpiote,
-        can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
+        led: Pin<Output<PushPull>>,
+        can: MCP2515<Spim<SPIM0>, Pin<Output<PushPull>>>,
     }
 
     #[init]
-    fn init(mut ctx: init::Context) -> (Shared, Local) {
-        // set SLEEPONEXIT and SLEEPDEEP bits to enter low power sleep states
-        ctx.core.SCB.set_sleeponexit();
-        ctx.core.SCB.set_sleepdeep();
-
+    fn init(ctx: init::Context) -> (Shared, Local) {
         // Initialize Monotonic
         let token = rtic_monotonics::create_nrf_timer0_monotonic_token!();
         Mono::start(ctx.device.TIMER0, token);
@@ -50,11 +47,14 @@ mod app {
         // initialize LED (OFF)
         let led = port1.p1_10.into_push_pull_output(Level::Low).degrade();
 
+        let gpiote = Gpiote::new(ctx.device.GPIOTE);
+
         // initialize SPI
         let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
         let spimosi = port0.p0_13.into_push_pull_output(Level::Low).degrade();
         let spimiso = port0.p0_15.into_floating_input().degrade();
-        let cs = port1.p1_08.into_push_pull_output(Level::Low);
+        let cs = port1.p1_08.into_push_pull_output(Level::Low).degrade();
+        let mcp_int = port0.p0_07.into_pullup_input().degrade();
 
         let pins = spim::Pins {
             sck: Some(spiclk),
@@ -62,45 +62,12 @@ mod app {
             mosi: Some(spimosi),
         };
 
-        let spi = Spim::new(
-            ctx.device.SPIM0,
-            pins,
-            spim::Frequency::K500,
-            spim::MODE_0,
-            0,
-        );
-
-        // initialize CAN
-        let mut delay = Delay::new(ctx.core.SYST);
-        let mut can = MCP2515::new(spi, cs);
-
-        can.init(
-            &mut delay,
-            mcp2515::Settings {
-                mode: OpMode::Normal,         // Loopback for testing and example
-                can_speed: CanSpeed::Kbps500, // Many options supported.
-                mcp_speed: McpSpeed::MHz8,    // Currently 16MHz and 8MHz chips are supported.
-                clkout_en: false,
-            },
-        )
-        .unwrap();
-
-        // setup GPIOTE peripheral to trigger an interrupt on P1_02
-        // high-to-low transition. another option would be to enable SENSE in pin
-        // configuration and then use GPIOTE PORT event for detection...
-        let button = port1.p1_02.into_pullup_input().degrade();
-        let gpiote = Gpiote::new(ctx.device.GPIOTE);
-
-        gpiote
-            .channel0()
-            .input_pin(&button)
-            .hi_to_lo()
-            .enable_interrupt();
+        let can = initialize_can(cs, &mcp_int, pins, ctx.device.SPIM0, &gpiote, ctx.core.SYST);
 
         // schedule task
         can_send_test::spawn().ok();
 
-        (Shared { led }, Local { gpiote, can })
+        (Shared {}, Local { led, can })
     }
 
     #[idle]
@@ -112,21 +79,7 @@ mod app {
         }
     }
 
-    #[task(binds = GPIOTE, shared = [led] , local = [gpiote, state: bool = false])]
-    fn gpiote_event(mut ctx: gpiote_event::Context) {
-        if ctx.local.gpiote.channel0().is_event_triggered() {
-            ctx.local.gpiote.channel0().reset_events();
-
-            defmt::info!("Button pressed!");
-            match *ctx.local.state {
-                true => ctx.shared.led.lock(|l| l.set_low().unwrap()),
-                false => ctx.shared.led.lock(|l| l.set_high().unwrap()),
-            }
-            *ctx.local.state = !*ctx.local.state;
-        }
-    }
-
-    #[task(priority = 1, shared = [], local = [can, state: bool = false])]
+    #[task(priority = 1, shared = [], local = [led, can, state: bool = false])]
     async fn can_send_test(ctx: can_send_test::Context) {
         loop {
             let frame = match *ctx.local.state {
@@ -147,7 +100,13 @@ mod app {
                 .send_message(frame)
                 .unwrap_or_else(|_| defmt::error!("Something went wrong"));
 
-            defmt::info!("Sent Midi Message");
+            if *ctx.local.state {
+                ctx.local.led.set_low().unwrap()
+            } else {
+                ctx.local.led.set_high().unwrap()
+            };
+
+            defmt::info!("Sent ARCANE Message");
 
             *ctx.local.state = !*ctx.local.state;
 

@@ -10,22 +10,24 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
 )]
 mod app {
 
-    use arcane_node::config::Config;
+    use arcane_node::config::Parameters;
     use arcane_node::mic::Microphone;
+    use arcane_node::{config::Config, initialize_can};
+    use arcane_node::{initialize_mic, process_cfg, SAMPLECOUNT};
     use embedded_hal::can::{Frame, Id, Id::Standard, StandardId};
-    use mcp2515::{error::Error, frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
+    use mcp2515::{error::Error, frame::CanFrame, MCP2515};
     use nrf52840_hal::{
         gpio::{p0, p1, Input, Level, Output, Pin, PullUp, PushPull},
         gpiote::Gpiote,
         pac::SPIM0,
         prelude::*,
-        spim, Clocks, Delay, Spim,
+        spim, Spim,
     };
     use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
     use serde_json_core;
 
     const GAIN: i8 = -35;
-    const SAMPLECOUNT: u16 = 128;
+    // const SAMPLECOUNT: u16 = 128;
 
     const CONFIG_JSON: &str = include_str!("../../config.json");
 
@@ -40,8 +42,7 @@ mod app {
     // Shared resources go here
     #[shared]
     struct Shared {
-        // led: Pin<Output<PushPull>>,
-        can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
+        can: MCP2515<Spim<SPIM0>, Pin<Output<PushPull>>>,
         config: Config,
     }
 
@@ -49,24 +50,19 @@ mod app {
     #[local]
     struct Local {
         gpiote: Gpiote,
-        // can: MCP2515<Spim<SPIM0>, p1::P1_08<Output<PushPull>>>,
         led_blue: Pin<Output<PushPull>>,
         led_red: Pin<Output<PushPull>>,
+        mcp_int: Pin<Input<PullUp>>,
         mic: Microphone,
         pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2],
         buf_to_display: usize,
         buf_to_capture: usize,
-        spi_int: Pin<Input<PullUp>>,
     }
 
     #[init]
     fn init(ctx: init::Context) -> (Shared, Local) {
         // Parse the JSON configuration data
         let config: Config = serde_json_core::from_str(CONFIG_JSON).unwrap().0;
-        defmt::info!("{:?}", config);
-        // set SLEEPONEXIT and SLEEPDEEP bits to enter low power sleep states
-        // ctx.core.SCB.set_sleeponexit();
-        // ctx.core.SCB.set_sleepdeep();
 
         // Initialize Monotonic
         let token = rtic_monotonics::create_nrf_timer0_monotonic_token!();
@@ -84,7 +80,8 @@ mod app {
         let spiclk = port0.p0_14.into_push_pull_output(Level::Low).degrade();
         let spimosi = port0.p0_13.into_push_pull_output(Level::Low).degrade();
         let spimiso = port0.p0_15.into_floating_input().degrade();
-        let cs = port1.p1_08.into_push_pull_output(Level::Low);
+        let cs = port1.p1_08.into_push_pull_output(Level::Low).degrade();
+        let mcp_int = port0.p0_07.into_pullup_input().degrade();
 
         let pins = spim::Pins {
             sck: Some(spiclk),
@@ -92,80 +89,24 @@ mod app {
             mosi: Some(spimosi),
         };
 
-        let spi = Spim::new(
-            ctx.device.SPIM0,
-            pins,
-            spim::Frequency::K500,
-            spim::MODE_0,
-            0,
-        );
-
-        // initialize CAN
-        let mut delay = Delay::new(ctx.core.SYST);
-        let mut can = MCP2515::new(spi, cs);
-
-        can.init(
-            &mut delay,
-            mcp2515::Settings {
-                mode: OpMode::Normal,          // Loopback for testing and example
-                can_speed: CanSpeed::Kbps1000, // Many options supported.
-                mcp_speed: McpSpeed::MHz16,    // Currently 16MHz and 8MHz chips are supported.
-                clkout_en: false,
-            },
-        )
-        .unwrap();
-
-        // initiliaze MIC
-
-        let mut mic = Microphone::new(ctx.device.PDM);
-
-        // we need the high frequency oscillator enabled for the microphone
-        let c = Clocks::new(ctx.device.CLOCK);
-        c.enable_ext_hfosc();
-
-        let pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2] = [[0; SAMPLECOUNT as usize]; 2];
-
-        let buf_to_display: usize = 0;
-        let buf_to_capture: usize = 1;
-
-        mic.enable();
-        mic.enable_interrupts();
-        mic.set_gain(GAIN);
-
-        mic.set_sample_buffer(&pdm_buffers[buf_to_capture]);
-        mic.start_sampling();
-
-        // setup GPIOTE peripheral to trigger an interrupt on P1_02
-        // high-to-low transition. another option would be to enable SENSE in pin
-        // configuration and then use GPIOTE PORT event for detection...
-        let _button = port1.p1_02.into_pullup_input().degrade();
-        let spi_int = port0.p0_07.into_pullup_input().degrade();
-
-        // read_can_message::spawn();
-
         let gpiote = Gpiote::new(ctx.device.GPIOTE);
 
-        gpiote
-            .channel0()
-            .input_pin(&spi_int)
-            .hi_to_lo()
-            .enable_interrupt();
+        let can = initialize_can(cs, &mcp_int, pins, ctx.device.SPIM0, &gpiote, ctx.core.SYST);
+
+        let (mic, pdm_buffers, buf_to_display, buf_to_capture) =
+            initialize_mic(ctx.device.PDM, ctx.device.CLOCK, &config);
 
         (
-            Shared {
-                // led,
-                can,
-                config,
-            },
+            Shared { can, config },
             Local {
                 gpiote,
                 led_blue,
                 led_red,
+                mcp_int,
                 mic,
                 pdm_buffers,
                 buf_to_display,
                 buf_to_capture,
-                spi_int,
             },
         )
     }
@@ -179,39 +120,32 @@ mod app {
         }
     }
 
-    #[task(binds = GPIOTE, shared = [can, config] , local = [gpiote, led_red, spi_int, state: bool = false])]
+    #[task(binds = GPIOTE, shared = [can, config], local = [gpiote, led_red, mcp_int, state: bool = false])]
     fn gpiote_event(mut ctx: gpiote_event::Context) {
-        if ctx.local.gpiote.channel0().is_event_triggered() {
-            ctx.local.gpiote.channel0().reset_events();
-            ctx.local.gpiote.channel0().clear();
-
-            // TODO: remove?
-            match ctx.local.spi_int.is_high() {
-                Ok(_) => defmt::trace!("Received frame"),
-                Err(_) => defmt::trace!("Pin is low?"),
-                // Err(_) => defmt::trace!("Cannot read pin state"),
-            }
-            defmt::info!("interrupt from spi!");
-
-            let config = ctx.shared.config.lock(|c| c.clone());
-
-            ctx.shared.can.lock(|c| match c.read_message() {
-                Ok(frame) => match frame.id() {
-                    Standard(id) if id == StandardId::new(config.id as u16).unwrap() => {
-                        defmt::trace!("Message for this node: {:?}", frame)
-                        // match against index of param
-                    }
-                    _ => defmt::trace!("Message for other node"),
-                },
-                Err(Error::NoMessage) => defmt::trace!("No message to read!"),
-                Err(_) => defmt::trace!("Oh no!"),
-            });
-            match *ctx.local.state {
-                true => ctx.local.led_red.set_low().unwrap(),
-                false => ctx.local.led_red.set_high().unwrap(),
-            }
-            *ctx.local.state = !*ctx.local.state;
+        if !ctx.local.gpiote.channel0().is_event_triggered() {
+            return;
         }
+
+        ctx.local.gpiote.channel0().reset_events();
+        ctx.local.gpiote.channel0().clear();
+
+        ctx.shared.config.lock(|config| {
+            ctx.shared.can.lock(|can| {
+                if let Ok(frame) = can.read_message() {
+                    process_cfg(frame, config);
+                } else {
+                    defmt::trace!("No message to read or something went wrong!");
+                }
+            });
+        });
+
+        // Toggle the LED state
+        if *ctx.local.state {
+            ctx.local.led_red.set_low().unwrap();
+        } else {
+            ctx.local.led_red.set_high().unwrap();
+        }
+        *ctx.local.state = !*ctx.local.state;
     }
 
     #[task(binds = PDM, shared = [config], local = [mic, led_blue, pdm_buffers, buf_to_display, buf_to_capture])]
@@ -222,7 +156,7 @@ mod app {
             ctx.local.led_blue.set_high().unwrap();
             defmt::println!("mean: {}", mean);
             send_can_message::spawn()
-                .unwrap_or_else(|_| defmt::error!("Cannot spawn task, already running..."));
+                .unwrap_or_else(|_| defmt::trace!("Cannot spawn task, already running..."));
         } else {
             ctx.local.led_blue.set_low().unwrap();
         }
@@ -246,11 +180,16 @@ mod app {
     async fn send_can_message(mut ctx: send_can_message::Context) {
         defmt::trace!("send note-on");
         let config = ctx.shared.config.lock(|c| c.clone());
+        defmt::trace!("config: {:?}", config);
         ctx.shared.can.lock(|c| {
             c.send_message(
                 CanFrame::new(
                     Id::Standard(StandardId::new((0b0001 as u16) << 7 | config.id as u16).unwrap()),
-                    &[0x90, config.parameters.note.value, 0x40],
+                    &[
+                        0x90 | (0x0F & config.parameters.channel.value),
+                        config.parameters.note.value,
+                        0x40,
+                    ],
                 )
                 .unwrap(),
             )
@@ -262,7 +201,11 @@ mod app {
             c.send_message(
                 CanFrame::new(
                     Id::Standard(StandardId::new((0b0001 as u16) << 7 | config.id as u16).unwrap()),
-                    &[0x90, config.parameters.note.value, 0x00],
+                    &[
+                        0x90 | (0x0F & config.parameters.channel.value),
+                        config.parameters.note.value,
+                        0x00,
+                    ],
                 )
                 .unwrap(),
             )

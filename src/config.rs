@@ -15,7 +15,7 @@ pub struct Parameter<T> {
 
 #[derive(Serialize, Deserialize, Format, Clone)]
 pub struct Parameters {
-    pub gain: Parameter<u8>,
+    pub gain: Parameter<i8>,
     pub threshold: Parameter<f32>,
     pub length: Parameter<u64>,
     pub throttle: Parameter<u64>,

@@ -10,8 +10,8 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
 )]
 mod app {
 
-    use arcane_node::config::Config;
     use arcane_node::mic::Microphone;
+    use arcane_node::{config::Config, initialize_mic};
     use nrf52840_hal::{
         gpio::{p0, p1, Level, Output, Pin, PushPull},
         gpiote::Gpiote,
@@ -52,19 +52,11 @@ mod app {
 
     #[init]
     fn init(mut ctx: init::Context) -> (Shared, Local) {
-        // Parse the JSON configuration data
-        let config: Config = serde_json_core::from_str(CONFIG_JSON).unwrap().0;
-        defmt::info!("{:?}", config);
-        // set SLEEPONEXIT and SLEEPDEEP bits to enter low power sleep states
-        ctx.core.SCB.set_sleeponexit();
-        ctx.core.SCB.set_sleepdeep();
-
         // Initialize Monotonic
         let token = rtic_monotonics::create_nrf_timer0_monotonic_token!();
         Mono::start(ctx.device.TIMER0, token);
 
-        // initialize gpio ports
-        let port0 = p0::Parts::new(ctx.device.P0);
+        // initialize gpio port
         let port1 = p1::Parts::new(ctx.device.P1);
 
         // initialize LED (OFF)
@@ -72,27 +64,10 @@ mod app {
 
         // initiliaze MIC
 
-        let mut mic = Microphone::new(ctx.device.PDM);
-
-        // we need the high frequency oscillator enabled for the microphone
-        let c = Clocks::new(ctx.device.CLOCK);
-        c.enable_ext_hfosc();
-
-        let pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2] = [[0; SAMPLECOUNT as usize]; 2];
-
-        let buf_to_display: usize = 0;
-        let buf_to_capture: usize = 1;
-
-        mic.enable();
-        mic.enable_interrupts();
-        mic.set_gain(GAIN);
-
-        mic.set_sample_buffer(&pdm_buffers[buf_to_capture]);
-        mic.start_sampling();
+        let (mic, pdm_buffers, buf_to_display, buf_to_capture) =
+            initialize_mic(ctx.device.PDM, ctx.device.CLOCK, &config);
 
         // setup GPIOTE peripheral to trigger an interrupt on P1_02
-        // high-to-low transition. another option would be to enable SENSE in pin
-        // configuration and then use GPIOTE PORT event for detection...
         let button = port1.p1_02.into_pullup_input().degrade();
         let gpiote = Gpiote::new(ctx.device.GPIOTE);
 
@@ -101,9 +76,6 @@ mod app {
             .input_pin(&button)
             .hi_to_lo()
             .enable_interrupt();
-
-        // schedule task
-        // mic_task::spawn().ok();
 
         (
             Shared { led },
@@ -168,42 +140,4 @@ mod app {
             .mic
             .set_sample_buffer(&ctx.local.pdm_buffers[*ctx.local.buf_to_capture]);
     }
-
-    // None interrupt way of doing the same
-    // #[task(priority = 1, shared = [led], local = [mic, pdm_buffers, buf_to_display, buf_to_capture])]
-    // async fn mic_task(mut ctx: mic_task::Context) {
-    //     ctx.local
-    //         .mic
-    //         .set_sample_buffer(&ctx.local.pdm_buffers[*ctx.local.buf_to_capture]);
-    //     ctx.local.mic.start_sampling();
-    //     defmt::info!("Starting recording task");
-    //     loop {
-    //         let mean = mean(&ctx.local.pdm_buffers[*ctx.local.buf_to_display]);
-    //         defmt::println!("mean: {}", mean);
-    //         if mean > 2000.00 {
-    //             ctx.shared.led.lock(|l| l.set_high().unwrap());
-    //         } else {
-    //             ctx.shared.led.lock(|l| l.set_low().unwrap());
-    //         }
-
-    //         (*ctx.local.buf_to_capture, *ctx.local.buf_to_display) =
-    //             if *ctx.local.buf_to_capture == 0 {
-    //                 (1, 0)
-    //             } else {
-    //                 (0, 1)
-    //             };
-
-    //         defmt::info!("waiting for start");
-    //         // Wait for the current buffer capture to complete, then start on the flipped buffer
-    //         while !ctx.local.mic.sampling_started() {}
-    //         defmt::info!("sampling has started");
-
-    //         ctx.local.mic.clear_sampling_started();
-    //         ctx.local
-    //             .mic
-    //             .set_sample_buffer(&ctx.local.pdm_buffers[*ctx.local.buf_to_capture]);
-
-    //         Mono::delay(100.nanos()).await;
-    //     }
-    // }
 }
