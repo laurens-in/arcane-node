@@ -12,38 +12,24 @@ mod app {
 
     use arcane_node::mic::Microphone;
     use arcane_node::{config::Config, initialize_mic};
+    use arcane_node::{mean, SAMPLECOUNT};
     use nrf52840_hal::{
-        gpio::{p0, p1, Level, Output, Pin, PushPull},
-        gpiote::Gpiote,
+        gpio::{p1, Level, Output, Pin, PushPull},
         prelude::*,
-        Clocks,
     };
-    use rtic_monotonics::nrf::timer::{ExtU64, Timer0 as Mono};
+    use rtic_monotonics::nrf::timer::Timer0 as Mono;
     use serde_json_core;
-
-    const GAIN: i8 = 0x00;
-    const SAMPLECOUNT: u16 = 128;
 
     const CONFIG_JSON: &str = include_str!("../../config.json");
 
-    fn mean(samples: &[i16]) -> f32 {
-        let mut avg: f32 = 0.0;
-        for s in samples {
-            avg += (*s).saturating_abs() as f32;
-        }
-        avg / (samples.len() as f32)
-    }
-
     // Shared resources go here
     #[shared]
-    struct Shared {
-        led: Pin<Output<PushPull>>,
-    }
+    struct Shared {}
 
     // Local resources go here
     #[local]
     struct Local {
-        gpiote: Gpiote,
+        led: Pin<Output<PushPull>>,
         mic: Microphone,
         pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2],
         buf_to_display: usize,
@@ -51,7 +37,9 @@ mod app {
     }
 
     #[init]
-    fn init(mut ctx: init::Context) -> (Shared, Local) {
+    fn init(ctx: init::Context) -> (Shared, Local) {
+        // Parse the JSON configuration data
+        let config: Config = serde_json_core::from_str(CONFIG_JSON).unwrap().0;
         // Initialize Monotonic
         let token = rtic_monotonics::create_nrf_timer0_monotonic_token!();
         Mono::start(ctx.device.TIMER0, token);
@@ -67,20 +55,10 @@ mod app {
         let (mic, pdm_buffers, buf_to_display, buf_to_capture) =
             initialize_mic(ctx.device.PDM, ctx.device.CLOCK, &config);
 
-        // setup GPIOTE peripheral to trigger an interrupt on P1_02
-        let button = port1.p1_02.into_pullup_input().degrade();
-        let gpiote = Gpiote::new(ctx.device.GPIOTE);
-
-        gpiote
-            .channel0()
-            .input_pin(&button)
-            .hi_to_lo()
-            .enable_interrupt();
-
         (
-            Shared { led },
+            Shared {},
             Local {
-                gpiote,
+                led,
                 mic,
                 pdm_buffers,
                 buf_to_display,
@@ -98,30 +76,16 @@ mod app {
         }
     }
 
-    #[task(binds = GPIOTE, shared = [led] , local = [gpiote, state: bool = false])]
-    fn gpiote_event(mut ctx: gpiote_event::Context) {
-        if ctx.local.gpiote.channel0().is_event_triggered() {
-            ctx.local.gpiote.channel0().reset_events();
-
-            defmt::info!("Button pressed!");
-            match *ctx.local.state {
-                true => ctx.shared.led.lock(|l| l.set_low().unwrap()),
-                false => ctx.shared.led.lock(|l| l.set_high().unwrap()),
-            }
-            *ctx.local.state = !*ctx.local.state;
-        }
-    }
-
-    #[task(binds = PDM, shared = [led], local = [mic, pdm_buffers, buf_to_display, buf_to_capture])]
-    fn mic_task(mut ctx: mic_task::Context) {
+    #[task(binds = PDM, shared = [], local = [led, mic, pdm_buffers, buf_to_display, buf_to_capture])]
+    fn mic_task(ctx: mic_task::Context) {
         defmt::info!("Starting recording task");
 
         let mean = mean(&ctx.local.pdm_buffers[*ctx.local.buf_to_display]);
         defmt::println!("mean: {}", mean);
         if mean > 2000.00 {
-            ctx.shared.led.lock(|l| l.set_high().unwrap());
+            ctx.local.led.set_high().unwrap();
         } else {
-            ctx.shared.led.lock(|l| l.set_low().unwrap());
+            ctx.local.led.set_low().unwrap();
         }
 
         (*ctx.local.buf_to_capture, *ctx.local.buf_to_display) = if *ctx.local.buf_to_capture == 0 {

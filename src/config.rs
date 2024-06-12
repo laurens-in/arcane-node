@@ -1,19 +1,19 @@
 use defmt::Format;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-#[derive(Serialize, Deserialize, Format, Clone)]
+#[derive(Deserialize, Format, Clone)]
 pub struct Config {
     pub id: u8,
     pub parameters: Parameters,
 }
 
-#[derive(Serialize, Deserialize, Format, Clone)]
+#[derive(Deserialize, Format, Clone)]
 pub struct Parameter<T> {
     pub index: u8,
     pub value: T,
 }
 
-#[derive(Serialize, Deserialize, Format, Clone)]
+#[derive(Deserialize, Format, Clone)]
 pub struct Parameters {
     pub gain: Parameter<i8>,
     pub threshold: Parameter<f32>,

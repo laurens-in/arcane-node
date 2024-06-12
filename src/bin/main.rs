@@ -11,7 +11,7 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
 mod app {
     use arcane_node::mic::Microphone;
     use arcane_node::{config::Config, initialize_can};
-    use arcane_node::{initialize_mic, process_cfg, SAMPLECOUNT};
+    use arcane_node::{initialize_mic, mean, process_cfg, SAMPLECOUNT};
     use embedded_hal::can::{Frame, Id, StandardId};
     use mcp2515::{frame::CanFrame, MCP2515};
     use nrf52840_hal::{
@@ -25,14 +25,6 @@ mod app {
     use serde_json_core;
 
     const CONFIG_JSON: &str = include_str!("../../config.json");
-
-    fn mean(samples: &[i16]) -> f32 {
-        let mut avg: f32 = 0.0;
-        for s in samples {
-            avg += (*s).saturating_abs() as f32;
-        }
-        avg / (samples.len() as f32)
-    }
 
     // Shared resources go here
     #[shared]
@@ -147,6 +139,7 @@ mod app {
     fn mic_task(mut ctx: mic_task::Context) {
         let threshold = ctx.shared.config.lock(|c| c.parameters.threshold.value);
         let mean = mean(&ctx.local.pdm_buffers[*ctx.local.buf_to_display]);
+        defmt::println!("mean: {}", mean);
         if mean > threshold {
             ctx.local.led_blue.set_high().unwrap();
             defmt::println!("mean: {}", mean);
