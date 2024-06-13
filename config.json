@@ -9,25 +9,25 @@
     },
     "threshold": {
       "index": 1,
-      "value": 1000,
+      "value": 800,
       "name": "Threshold",
       "description": "Threshold when trigger should detect, i16 > 0"
     },
     "length": {
       "index": 2,
-      "value": 1,
+      "value": 20,
       "name": "Length",
       "description": "How long should the note play, i16"
     },
     "throttle": {
       "index": 3,
-      "value": 1,
+      "value": 5,
       "name": "Length",
       "description": "How long should the note play, i16"
     },
     "note": {
       "index": 4,
-      "value": 70,
+      "value": 60,
       "name": "Note Number",
       "description": "MIDI note number"
     },

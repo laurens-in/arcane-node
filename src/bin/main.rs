@@ -9,10 +9,11 @@ use arcane_node as _; // global logger + panicking-behavior + memory layout
     dispatchers = [SWI0_EGU0]
 )]
 mod app {
+    use arcane_node::arcane::{ArcaneCode, ArcaneId};
     use arcane_node::mic::Microphone;
     use arcane_node::{config::Config, initialize_can};
     use arcane_node::{initialize_mic, mean, process_cfg, SAMPLECOUNT};
-    use embedded_hal::can::{Frame, Id, StandardId};
+    use embedded_hal::can::Frame;
     use mcp2515::{frame::CanFrame, MCP2515};
     use nrf52840_hal::{
         gpio::{p0, p1, Input, Level, Output, Pin, PullUp, PushPull},
@@ -108,7 +109,7 @@ mod app {
     }
 
     #[task(binds = GPIOTE, shared = [can, config], local = [gpiote, led_red, mcp_int, state: bool = false])]
-    fn gpiote_event(mut ctx: gpiote_event::Context) {
+    fn can_event(mut ctx: can_event::Context) {
         if !ctx.local.gpiote.channel0().is_event_triggered() {
             return;
         }
@@ -139,10 +140,9 @@ mod app {
     fn mic_task(mut ctx: mic_task::Context) {
         let threshold = ctx.shared.config.lock(|c| c.parameters.threshold.value);
         let mean = mean(&ctx.local.pdm_buffers[*ctx.local.buf_to_display]);
-        defmt::println!("mean: {}", mean);
         if mean > threshold {
             ctx.local.led_blue.set_high().unwrap();
-            defmt::println!("mean: {}", mean);
+            defmt::trace!("mean: {}", mean);
             send_can_message::spawn()
                 .unwrap_or_else(|_| defmt::trace!("Cannot spawn task, already running..."));
         } else {
@@ -172,7 +172,9 @@ mod app {
         ctx.shared.can.lock(|c| {
             c.send_message(
                 CanFrame::new(
-                    Id::Standard(StandardId::new((0b0001 as u16) << 7 | config.id as u16).unwrap()),
+                    ArcaneId::new(ArcaneCode::MIDI0, config.id)
+                        .unwrap()
+                        .as_can_id(),
                     &[
                         0x90 | (0x0F & config.parameters.channel.value),
                         config.parameters.note.value,
@@ -188,7 +190,9 @@ mod app {
         ctx.shared.can.lock(|c| {
             c.send_message(
                 CanFrame::new(
-                    Id::Standard(StandardId::new((0b0001 as u16) << 7 | config.id as u16).unwrap()),
+                    ArcaneId::new(ArcaneCode::MIDI0, config.id)
+                        .unwrap()
+                        .as_can_id(),
                     &[
                         0x90 | (0x0F & config.parameters.channel.value),
                         config.parameters.note.value,

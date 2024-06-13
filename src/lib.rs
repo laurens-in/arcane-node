@@ -1,10 +1,11 @@
 #![no_main]
 #![no_std]
 
+use arcane::{ArcaneCode, ArcaneId};
 use config::Config;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use defmt_brtt as _;
-use embedded_hal::can::{Frame, Id::Standard, StandardId};
+use embedded_hal::can::{Frame, Id::Standard};
 use mic::Microphone; // global logger
 
 use mcp2515::{frame::CanFrame, regs::OpMode, CanSpeed, McpSpeed, MCP2515};
@@ -18,6 +19,7 @@ use nrf52840_hal::{
     spim, Clocks, Delay, Spim,
 };
 
+pub mod arcane;
 pub mod config;
 pub mod mic;
 
@@ -105,22 +107,14 @@ pub fn initialize_mic(
     (mic, pdm_buffers, buf_to_display, buf_to_capture)
 }
 
-pub fn get_arcane_id(func_code: u8, node_id: u8) -> u16 {
-    // Ensure func_code is within the range 0-15 (4 bits)
-    let func_code = func_code & 0x0F;
-    // Ensure node_id is within the range 0-127 (7 bits)
-    let node_id = node_id & 0x7F;
-
-    // Combine func_code and node_id into an 11-bit value
-    let arcane_id = ((func_code as u16) << 7) | (node_id as u16);
-
-    arcane_id
-}
-
 pub fn process_cfg(frame: CanFrame, config: &mut Config) {
     match frame.id() {
-        // 7 is a magic number that corresponds to CFGW
-        Standard(id) if id == StandardId::new(get_arcane_id(7, config.id)).unwrap() => {
+        Standard(id)
+            if id
+                == ArcaneId::new(ArcaneCode::CFGW, config.id)
+                    .unwrap()
+                    .as_standard_id() =>
+        {
             defmt::trace!("CFGW message for this node: {:?}", frame);
             // first byte contains parameter index
             match frame.data()[0] {
