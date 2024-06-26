@@ -15,6 +15,7 @@ mod app {
     use arcane_node::{initialize_mic, mean, process_cfg, SAMPLECOUNT};
     use embedded_hal::can::Frame;
     use mcp2515::{frame::CanFrame, MCP2515};
+    use nrf52840_hal::Rng;
     use nrf52840_hal::{
         gpio::{p0, p1, Input, Level, Output, Pin, PullUp, PushPull},
         gpiote::Gpiote,
@@ -45,6 +46,7 @@ mod app {
         pdm_buffers: [[i16; SAMPLECOUNT as usize]; 2],
         buf_to_display: usize,
         buf_to_capture: usize,
+        rng: Rng,
     }
 
     #[init]
@@ -84,6 +86,8 @@ mod app {
         let (mic, pdm_buffers, buf_to_display, buf_to_capture) =
             initialize_mic(ctx.device.PDM, ctx.device.CLOCK, &config);
 
+        let rng = Rng::new(ctx.device.RNG);
+
         (
             Shared { can, config },
             Local {
@@ -95,6 +99,7 @@ mod app {
                 pdm_buffers,
                 buf_to_display,
                 buf_to_capture,
+                rng,
             },
         )
     }
@@ -164,9 +169,11 @@ mod app {
             .set_sample_buffer(&ctx.local.pdm_buffers[*ctx.local.buf_to_capture]);
     }
 
-    #[task(priority = 1, shared = [can, config])]
+    #[task(priority = 1, shared = [can, config], local = [rng])]
     async fn send_can_message(mut ctx: send_can_message::Context) {
         defmt::trace!("send note-on");
+        let note = (ctx.local.rng.random_u8() / 7) + 65;
+        let control = (ctx.local.rng.random_u8() / 7) + 65;
         let config = ctx.shared.config.lock(|c| c.clone());
         defmt::trace!("config: {:?}", config);
         ctx.shared.can.lock(|c| {
@@ -175,15 +182,25 @@ mod app {
                     ArcaneId::new(ArcaneCode::MIDI0, config.id)
                         .unwrap()
                         .as_can_id(),
+                    &[0x90 | (0x0F & config.parameters.channel.value), note, 0x40],
+                )
+                .unwrap(),
+            )
+            .unwrap_or_else(|_| defmt::error!("Something went wrong"));
+            c.send_message(
+                CanFrame::new(
+                    ArcaneId::new(ArcaneCode::MIDI0, config.id)
+                        .unwrap()
+                        .as_can_id(),
                     &[
-                        0x90 | (0x0F & config.parameters.channel.value),
-                        config.parameters.note.value,
-                        0x40,
+                        0xB0 | (0x0F & config.parameters.channel.value),
+                        0x01,
+                        control,
                     ],
                 )
                 .unwrap(),
             )
-            .unwrap_or_else(|_| defmt::error!("Something went wrong"))
+            .unwrap_or_else(|_| defmt::error!("Something went wrong"));
         });
         Mono::delay(config.parameters.length.value.millis()).await;
         defmt::trace!("send note-off");
@@ -193,11 +210,7 @@ mod app {
                     ArcaneId::new(ArcaneCode::MIDI0, config.id)
                         .unwrap()
                         .as_can_id(),
-                    &[
-                        0x90 | (0x0F & config.parameters.channel.value),
-                        config.parameters.note.value,
-                        0x00,
-                    ],
+                    &[0x90 | (0x0F & config.parameters.channel.value), note, 0x00],
                 )
                 .unwrap(),
             )
