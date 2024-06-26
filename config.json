@@ -3,31 +3,31 @@
   "parameters": {
     "gain": {
       "index": 0,
-      "value": -40,
+      "value": -38,
       "name": "Gain",
       "description": "Microphone Gain, can range from -40 to 40"
     },
     "threshold": {
       "index": 1,
-      "value": 800,
+      "value": 20000,
       "name": "Threshold",
       "description": "Threshold when trigger should detect, i16 > 0"
     },
     "length": {
       "index": 2,
-      "value": 20,
+      "value": 150,
       "name": "Length",
       "description": "How long should the note play, i16"
     },
     "throttle": {
       "index": 3,
-      "value": 5,
+      "value": 30,
       "name": "Length",
       "description": "How long should the note play, i16"
     },
     "note": {
       "index": 4,
-      "value": 60,
+      "value": 68,
       "name": "Note Number",
       "description": "MIDI note number"
     },
